@@ -1,0 +1,675 @@
+---
+title: "American Whitewater"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard: 
+    navbar:
+      - { icon: "fa-question-circle", href: "https://dwr.state.co.us/Tools", align: right }
+    theme: cerulean
+    orientation: columns
+    source_code: embed
+    vertical_layout: fill
+---
+
+```{r setup, include = FALSE}
+# Shiny & Flexdashboard libraries
+library(shiny)
+library(flexdashboard)
+
+# Data libraries
+library(tidyr)
+library(ggplot2)
+library(highcharter)
+library(dplyr)
+library(leaflet)
+library(sf)
+library(rgdal)
+library(raster)
+library(viridisLite)
+library(leaflegend)
+library(RColorBrewer)
+
+
+source('utils.R')
+```
+
+ 
+
+```{r context="server"}
+
+# coord ref. system 26915
+crs             <- CRS('+init=EPSG:26915')
+
+res_pts         <- readRDS("reservoir_pts2.rds") 
+  # filter(structure_name != "joe_wright_pod")
+
+res_storage       <- readRDS("reservoir_stage3.rds")
+
+# res_diversions  <- readRDS("reservoir_diversions.rds") %>% 
+#   dplyr::select(-structure_name) %>% 
+#   rename("structure_name" = "name")
+
+res_diversions  <- readRDS("reservoir_outflow2.rds") 
+# res_diversions <- readRDS("reservoir_outflow_NA.rds") 
+  # dplyr::select(-structure_name) %>% 
+  # rename("structure_name" = "name")
+# water_balance_na <- readRDS("reservoir_water_balance_NA.rds")
+water_balance <- readRDS("reservoir_water_balance.rds")
+
+# USGS gage points
+gage_pts <- readRDS("gage_pts.rds")
+
+# USGS gage data
+below_ld <- readRDS("daily_discharge_below_long_draw.rds")
+below_jw <- readRDS("daily_discharge_below_joe_wright.rds")
+above_jw <- readRDS("daily_discharge_above_joe_wright.rds")
+
+# Initialize Maps 
+output$baseMap        <- renderLeaflet({ 
+    basemap(
+      res_pts   = res_pts, 
+      gage_pts  = gage_pts 
+    ) 
+  })
+```
+
+
+Data outputs
+=====================================
+Column {data-width=350}
+-----------------------------------------------------------------------
+### Poudre River Structures
+```{r}
+leafletOutput("baseMap")
+```
+
+### Reservoir storage
+```{r}
+# plotOutput("diversionsPlot")
+highchartOutput("storagePlot")
+```
+
+```{r context="server"}
+# Clicking on map 1 outputs Value boxes on both pages + catchment polygons + Dat table + success panel
+observeEvent(input$baseMap_click, {
+   if(!is.null(input$baseMap_click)) {
+      click <- input$baseMap_click %>%
+        data.frame() %>%
+        dplyr::select(lat,lng)
+      print(click)
+
+      pt <- sf::st_as_sf(
+        click,
+        coords = c("lng", "lat"),
+        crs = 4326
+        )
+      
+      struct_name <- input$baseMap_marker_click$id
+      # struct_name <- "long_draw"
+      
+      storage    <- res_storage %>%
+        filter(structure_name == struct_name) %>% 
+        mutate(
+          # date = lubridate::mdy(date),
+          year = lubridate::year(date)
+        ) %>%
+        group_by(year) %>%
+        summarize(
+          volume = mean(volume, na.rm = T),
+          stage  = mean(stage, na.rm = T)
+                  ) %>% 
+        mutate(across(where(anyNA), ~ replace_na(., 0))) 
+        # arrange(date)
+      
+      storage_plot <- 
+        highchart() %>%  
+        hc_plotOptions(line   = list(marker = list(enabled = FALSE, symbol = "circle"), lineWidth = 3)) %>%
+         hc_title(text = "Reservoir storage & stage", 
+            style = list(color = "black", fontSize = 18, fontWeight = "bold")) %>%
+        hc_xAxis( 
+            title = list(style = list(fontSize = 14, fontWeight = "bold", color = "black")),
+            labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>%
+         # type = "datetime" reversed = T tickInterval =  50) %>%
+        hc_yAxis_multiples(
+          list(title = list(text = "Storage volume (AF)",
+                            style = list(fontSize = 14, color = "black", fontWeight = "bold")),
+               labels=list(style = list(fontSize = 11, color = "black", fontWeight = "bold"), format = '{value} AF'),
+               min=0, max=max(storage$volume),
+               showFirstLabel = TRUE,showLastLabel=TRUE,
+               opposite = FALSE),
+          list(title = list(text = "Stage (ft)", style = list(fontSize = 14, color = "black", fontWeight = "bold")),
+               min=0, max = max(storage$stage),
+               labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"), format = "{value} ft"), showLastLabel = FALSE,
+               opposite = TRUE)) %>%
+            # hc_yAxis_multiples(create_yaxis(naxis = 2, heights = c(1, 1))) %>%
+            hc_legend(itemStyle = list(fontSize = 14, color = "black", fontWeight = "bold")) %>%
+            hc_add_series(
+              data = storage,
+              hcaes(x = year, y = volume),
+              type = 'column',
+              name = "Storage volume", 
+              yAxis = 0, 
+              # pointRange =  24 * 3600 * 1000,
+              fillOpacity = 0.8) %>% 
+            hc_add_series(
+              data = storage,
+              hcaes(x = year, y = stage),
+              type = 'line',
+              name = "Stage", 
+              # pointRange =  24 * 3600 * 1000,
+              yAxis = 1,
+              fillOpacity = 0.8) %>% 
+            hc_colors(c("darkcyan", "darkred")) %>%
+            hc_chart(plotBorderWidth = 0.5, plotBorderColor = '#b4b4b4', height = NULL)
+      # diversions_plot <- ggplot() +
+      #       geom_col(data = diversions, aes(x = date, y = vol)) +
+      #       labs( title = "Monthly water diversions",   x     = "Date", y     = "Water diversions") + 
+      #       theme_bw() +
+      #       theme(axis.title = element_text(face = "bold", size = 12),axis.text  = element_text(size = 10),   plot.title = element_text(face = "bold", size = 11))      
+      
+# output$diversionsPlot <- renderPlot({
+#        diversions_plot
+#       })
+output$storagePlot <- renderHighchart({
+       storage_plot
+      })
+      # point intersection w/ polygons
+      # print(pt)
+
+      # # ensure  app will not crash if a somewhere other than a shape is clicked and returns no results from point-shape intersection
+      #  if(nrow(pt_intersect) == 0) {
+      #     NULL
+      #  } else {
+      #     district_id <- pt_intersect %>%
+      #         rename(district = DISTRICT) %>%
+      #         mutate(district = as.numeric(district))
+      # 
+     
+    }
+})
+```
+
+<!-- Column {data-width=350} -->
+<!-- ----------------------------------------------------------------------- -->
+<!-- ### Reservoir diversions -->
+<!-- ```{r} -->
+<!-- # plotOutput("diversionsPlot") -->
+<!-- highchartOutput("diversionsPlot") -->
+<!-- ``` -->
+
+<!-- ```{r context="server"} -->
+<!-- # Clicking on map 1 outputs Value boxes on both pages + catchment polygons + Dat table + success panel -->
+<!-- observeEvent(input$baseMap_click, { -->
+<!--    if(!is.null(input$baseMap_click)) { -->
+<!--       click <- input$baseMap_click %>% -->
+<!--         data.frame() %>% -->
+<!--         dplyr::select(lat,lng) -->
+<!--       print(click) -->
+
+<!--       pt <- sf::st_as_sf( -->
+<!--         click, -->
+<!--         coords = c("lng", "lat"), -->
+<!--         crs = 4326 -->
+<!--         ) -->
+
+<!--       struct_name <- input$baseMap_marker_click$id -->
+<!--       # struct_name <- "long_draw" -->
+
+<!--       diversions <- res_diversions %>%  -->
+<!--         filter(structure_name == struct_name, water_type == "diversions") %>%  -->
+<!--         mutate(across(where(anyNA), ~ replace_na(., 0))) %>%  -->
+<!--         arrange(date) -->
+
+<!--       diversions_plot <- highchart() %>% -->
+<!--           hc_plotOptions( -->
+<!--             line = list(marker = list(enabled = FALSE, symbol = "circle"), lineWidth = 3), -->
+<!--             scatter = list(marker = list(symbol = "circle", radius = 5))) %>% -->
+<!--           hc_title(text = "Monthly water diversions", style = list(color = "black", fontSize = 18, fontWeight = "bold")) %>%  -->
+<!--           hc_yAxis( -->
+<!--             title = list(text = "Water volume", style = list(fontSize = 14, fontWeight = "bold", color = "black")), -->
+<!--             labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>% -->
+<!--           hc_xAxis( -->
+<!--              title = list(text = "Date", style = list(fontSize = 14, fontWeight = "bold", color = "black")), -->
+<!--              labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold")),  -->
+<!--              reversed = T) %>% -->
+<!--           hc_legend(itemStyle = list(fontSize = 14, color = "black", fontWeight = "bold")) %>% -->
+<!--           hc_add_series( -->
+<!--             data = diversions, -->
+<!--             hcaes(x = date, y = vol), -->
+<!--             type = 'line', -->
+<!--             name = "Water diversions", # yAxis = 0, -->
+<!--             fillOpacity = 0.8) %>%  -->
+<!--         hc_colors(c("darkcyan")) %>% -->
+<!--         hc_chart(plotBorderWidth = 0.5, plotBorderColor = '#b4b4b4', height = NULL) -->
+<!--       # diversions_plot <- ggplot() + -->
+<!--       #       geom_col(data = diversions, aes(x = date, y = vol)) + -->
+<!--       #       labs( title = "Monthly water diversions",   x     = "Date", y     = "Water diversions") +  -->
+<!--       #       theme_bw() + -->
+<!--       #       theme(axis.title = element_text(face = "bold", size = 12),axis.text  = element_text(size = 10),   plot.title = element_text(face = "bold", size = 11))       -->
+
+<!-- # output$diversionsPlot <- renderPlot({ -->
+<!-- #        diversions_plot -->
+<!-- #       }) -->
+<!-- output$diversionsPlot <- renderHighchart({ -->
+<!--        diversions_plot -->
+<!--       }) -->
+<!--       # point intersection w/ polygons -->
+<!--       # print(pt) -->
+
+<!--       # # ensure  app will not crash if a somewhere other than a shape is clicked and returns no results from point-shape intersection -->
+<!--       #  if(nrow(pt_intersect) == 0) { -->
+<!--       #     NULL -->
+<!--       #  } else { -->
+<!--       #     district_id <- pt_intersect %>% -->
+<!--       #         rename(district = DISTRICT) %>% -->
+<!--       #         mutate(district = as.numeric(district)) -->
+<!--       #  -->
+
+<!--     } -->
+<!-- }) -->
+<!-- ``` -->
+
+<!-- Column {data-width=350} -->
+<!-- ----------------------------------------------------------------------- -->
+<!-- ### Reservoir releases -->
+<!-- ```{r} -->
+<!-- # plotOutput("diversionsPlot") -->
+<!-- highchartOutput("releasesPlot") -->
+<!-- ``` -->
+
+<!-- ```{r context="server"} -->
+<!-- # Clicking on map 1 outputs Value boxes on both pages + catchment polygons + Dat table + success panel -->
+<!-- observeEvent(input$baseMap_click, { -->
+<!--    if(!is.null(input$baseMap_click)) { -->
+<!--       click <- input$baseMap_click %>% -->
+<!--         data.frame() %>% -->
+<!--         dplyr::select(lat,lng) -->
+<!--       print(click) -->
+
+<!--       pt <- sf::st_as_sf( -->
+<!--         click, -->
+<!--         coords = c("lng", "lat"), -->
+<!--         crs = 4326 -->
+<!--         ) -->
+
+<!--       struct_name <- input$baseMap_marker_click$id -->
+<!--       # struct_name <- "long_draw" -->
+
+<!--       releases <- res_diversions %>%  -->
+<!--         filter(structure_name == struct_name, water_type == "releases") %>%  -->
+<!--         mutate(across(where(anyNA), ~ replace_na(., 0))) %>%  -->
+<!--         arrange(date) -->
+
+
+<!--       releases_plot <- highchart() %>% -->
+<!--           hc_plotOptions( -->
+<!--              line = list(marker = list(enabled = FALSE, symbol = "circle"), lineWidth = 3), -->
+<!--              scatter = list(marker = list(symbol = "circle", radius = 5))) %>% -->
+<!--           hc_title(text = "Monthly water releases", style = list(color = "black", fontSize = 18, fontWeight = "bold")) %>%  -->
+<!--           hc_yAxis( -->
+<!--              title = list(text = "Water volume", style = list(fontSize = 14, fontWeight = "bold", color = "black")), -->
+<!--              labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>% -->
+<!--           hc_xAxis( -->
+<!--              title = list(text = "Date", style = list(fontSize = 14, fontWeight = "bold", color = "black")), -->
+<!--              labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold")),  -->
+<!--              reversed = T) %>% -->
+<!--           hc_legend(itemStyle = list(fontSize = 14, color = "black", fontWeight = "bold")) %>% -->
+<!--           hc_add_series( -->
+<!--              data = releases, -->
+<!--              hcaes(x = date, y = vol), -->
+<!--              type = 'line', -->
+<!--              name = "Water releases", # yAxis = 0, -->
+<!--              fillOpacity = 0.8) %>%  -->
+<!--           hc_colors(c("darkred")) %>%  -->
+<!--           hc_chart(plotBorderWidth = 0.5, plotBorderColor = '#b4b4b4', height = NULL) -->
+<!--       # diversions_plot <- ggplot() + -->
+<!--       #       geom_col(data = diversions, aes(x = date, y = vol)) + -->
+<!--       #       labs( title = "Monthly water diversions",   x     = "Date", y     = "Water diversions") +  -->
+<!--       #       theme_bw() + -->
+<!--       #       theme(axis.title = element_text(face = "bold", size = 12),axis.text  = element_text(size = 10),   plot.title = element_text(face = "bold", size = 11))       -->
+
+<!-- # output$diversionsPlot <- renderPlot({ -->
+<!-- #        diversions_plot -->
+<!-- #       }) -->
+
+<!-- output$releasesPlot <- renderHighchart({ -->
+<!--        releases_plot -->
+<!--       }) -->
+
+<!--     } -->
+<!-- }) -->
+<!-- ``` -->
+
+Column {data-width=550}
+-----------------------------------------------------------------------
+### Water balance
+```{r}
+# plotOutput("diversionsPlot")
+highchartOutput("waterbalancePlot")
+```
+
+```{r context="server"}
+# Clicking on map 1 outputs Value boxes on both pages + catchment polygons + Dat table + success panel
+observeEvent(input$baseMap_click, {
+   if(!is.null(input$baseMap_click)) {
+      click <- input$baseMap_click %>%
+        data.frame() %>%
+        dplyr::select(lat,lng)
+      print(click)
+
+      pt <- sf::st_as_sf(
+        click,
+        coords = c("lng", "lat"),
+        crs = 4326
+        )
+      
+      struct_name <- input$baseMap_marker_click$id
+      # struct_name <- "long_draw"
+      # dstorage, inflows, outflows all reservoirs
+      sub_wb <- water_balance %>%
+        filter(structure_name == struct_name) %>% 
+        mutate(
+          date = as.character(date)
+          ) %>%
+        rename(Inflow = inflow, Outflow = releases, "Change in storage" = dstorage) %>% 
+        pivot_longer(cols = c(Inflow, Outflow, "Change in storage"), names_to = "flow_type", values_to = "volume")
+      
+      water_balance_plot <- 
+        highchart() %>%
+              hc_plotOptions(line = list(marker = list(enabled = FALSE, symbol = "circle"), lineWidth = 3), area = list(marker = list(enabled = FALSE)))%>%
+              hc_title(text = "Water balance<br>(Change in storage = Inflows - Outflows)", style = list(color = "black", fontSize = 20, fontWeight = "bold")) %>%
+              hc_xAxis(tickInterval = 60, categories = unique(sub_wb$date),
+                       title = list(style = list(fontSize = 14, fontWeight = "bold", color = "black")),
+                       labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>%
+              hc_yAxis(title = list(text = "Water volume (AF)", style = list(fontSize = 14, fontWeight = "bold", color = "black")),
+                       labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>%
+              # hc_yAxis_multiples(create_yaxis(naxis = 4, heights = c(1, 1), title = list(text = "Joe Wright", "Barnes", "Long Draw", "Chambers Lake"))) %>%
+              hc_legend(itemStyle = list(fontSize = 14, color = "black", fontWeight = "bold")) %>%
+              hc_add_series(
+                data = sub_wb,
+                hcaes(x = date, y = volume, group = flow_type),
+                type = 'line',
+                yAxis = 0,
+                fillOpacity = 0.6, showInLegend = T) %>% 
+             hc_navigator(
+                enabled = TRUE, outlineColor = "gray", outlineWidth = 2,
+                series = list(color = "black",lineWidth = 2,
+                  type = "areaspline",  fillColor = "white"
+                ),
+                handles = list( backgroundColor = "grey",  borderColor = "black")) %>%
+             hc_colors(c("dodgerblue", "darkgreen",  "#e33b4c")) %>%
+              # hc_colors(c("#70a7ff", "#6ec439", "#ff708d")) %>%
+             hc_chart(plotBorderWidth = 0.5, plotBorderColor = '#b4b4b4', height = NULL)
+      
+  output$waterbalancePlot <- renderHighchart({
+         water_balance_plot
+        })
+    }
+})
+```    
+
+### Gage observations
+```{r}
+highchartOutput("gagePlot")
+```
+
+```{r context = "server"}
+# Clicking on map 1 outputs Value boxes on both pages + catchment polygons + Dat table + success panel
+observeEvent(input$baseMap_click, {
+   if(!is.null(input$baseMap_click)) {
+      click <- input$baseMap_click %>%
+        data.frame() %>%
+        dplyr::select(lat,lng)
+      print(click)
+
+      pt <- sf::st_as_sf(
+        click,
+        coords = c("lng", "lat"),
+        crs = 4326
+        )
+      
+      struct_name <- input$baseMap_marker_click$id
+      # struct_name <- "long_draw"
+      
+      gage_plot <- 
+        highchart() %>%
+            hc_plotOptions(
+              line = list(marker = list(enabled = FALSE, symbol = "circle"),
+                          lineWidth = 3), area = list(marker = list(enabled = FALSE)))%>%
+            hc_title(text = "Daily discharge", style = list(color = "black", fontSize = 20, fontWeight = "bold")) %>%
+            hc_xAxis(
+              tickInterval = 300, categories = unique(below_ld$date),
+              title = list(style = list(fontSize = 14, fontWeight = "bold", color = "black")),
+              labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>%
+            hc_yAxis(
+              title = list(text = "Discharge (AF)", style = list(fontSize = 14, fontWeight = "bold", color = "black")),
+              labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>%
+            hc_legend(itemStyle = list(fontSize = 14, color = "black", fontWeight = "bold")) %>%
+            hc_add_series(
+              data = below_jw,
+              hcaes(x = date, y = discharge_af_total),
+              type = 'line',
+              name = "Gage above Joe Wright",
+              yAxis = 0, fillOpacity = 0.6, showInLegend = T) %>% 
+            hc_add_series(
+              data = above_jw,
+              hcaes(x = date, y = discharge_af_total),
+              type = 'line',
+              name = "Gage below Joe Wright",
+              yAxis = 0, fillOpacity = 0.6, showInLegend = T) %>% 
+            hc_add_series(
+              data = below_ld,
+              hcaes(x = date, y = discharge_af_total),
+              type = 'line',
+              name = "Gage below Long Draw",
+              yAxis = 0, fillOpacity = 0.6, showInLegend = T) %>% 
+            hc_navigator(
+              enabled = TRUE, outlineColor = "gray", outlineWidth = 2,
+              series = list(color = "black",lineWidth = 2,type = "areaspline",  fillColor = "white"),
+              handles = list( backgroundColor = "grey",  borderColor = "black")) %>%
+            hc_colors(c("#95D9C3", "#4F7CAC",  "#162521")) %>%
+            hc_chart(plotBorderWidth = 0.5, plotBorderColor = '#b4b4b4', height = NULL)
+      
+   output$gagePlot <- renderHighchart({
+         gage_plot
+        })
+   }
+})
+```
+
+<!-- ### Total inflows vs outflows -->
+<!-- ```{r} -->
+<!-- # plotOutput("diversionsPlot") -->
+<!-- highchartOutput("totalFlowsPlot") -->
+<!-- ``` -->
+
+<!-- ```{r context="server"} -->
+<!-- observeEvent(input$baseMap_click, { -->
+<!--    if(!is.null(input$baseMap_click)) { -->
+<!--       click <- input$baseMap_click %>% -->
+<!--         data.frame() %>% -->
+<!--         dplyr::select(lat,lng) -->
+<!--       print(click) -->
+
+<!--       pt <- sf::st_as_sf( -->
+<!--         click, -->
+<!--         coords = c("lng", "lat"), -->
+<!--         crs = 4326 -->
+<!--         ) -->
+
+<!--       struct_name <- input$baseMap_marker_click$id -->
+
+<!--       inflows <- water_balance %>%  -->
+<!--           mutate( -->
+<!--             id    = 1:n(), -->
+<!--             # year  = year(date), -->
+<!--             date  = as.character(date) -->
+<!--             ) %>% -->
+<!--           group_by(date) %>% -->
+<!--           summarise( -->
+<!--             releases = sum(releases), -->
+<!--             inflow   = sum(inflow_abs) -->
+<!--           ) -->
+<!--       # struct_name <- "long_draw" -->
+<!--       # dstorage, inflows, outflows all reservoirs -->
+<!--          total_flows_plot <-  -->
+<!--            highchart() %>% -->
+<!--             hc_plotOptions( -->
+<!--               # column   = list(stacking = "normal"), -->
+<!--               # area   = list(stacking = "normal"), -->
+<!--               line   = list(marker = list(enabled = FALSE, symbol = "circle"), lineWidth = 3)) %>% -->
+<!--             hc_title(text = "Summary of all reservoir natural inflows vs. releases", -->
+<!--                      style = list(color = "black", fontSize = 18, fontWeight = "bold")) %>% -->
+<!--             # hc_xAxis( -->
+<!--             #   # tickInterval = 60, -->
+<!--             #          categories = as.list(inflows$date), -->
+<!--             #          title = list(style = list(fontSize = 14, fontWeight = "bold", color = "black")), -->
+<!--             #          labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>% -->
+<!--             hc_yAxis(title = list(style = list(fontSize = 14, fontWeight = "bold", color = "black")), -->
+<!--                      labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>% -->
+<!--             # hc_yAxis_multiples(create_yaxis(naxis = 2, heights = c(1, 1))) %>% -->
+<!--             hc_legend(itemStyle = list(fontSize = 14, color = "black", fontWeight = "bold")) %>% -->
+<!--             hc_add_series( -->
+<!--               data = inflows, -->
+<!--               hcaes(x = date, y = releases), -->
+<!--               type = 'column', -->
+<!--               name = "Outflows", -->
+<!--               yAxis = 0, -->
+<!--               # pointRange =  24 * 3600 * 1000, -->
+<!--               fillOpacity = 0.8) %>% -->
+<!--             hc_add_series( -->
+<!--               data = inflows, -->
+<!--               hcaes(x = date, y = inflow), -->
+<!--               type = 'column', -->
+<!--               name = "Inflows", -->
+<!--               yAxis = 0, -->
+<!--               # pointRange =  24 * 3600 * 1000, -->
+<!--               fillOpacity = 0.8) %>% -->
+<!--             hc_navigator( -->
+<!--               enabled = TRUE, -->
+<!--               outlineColor = "gray", -->
+<!--               outlineWidth = 2, -->
+<!--               series = list( -->
+<!--                 color = "black", -->
+<!--                 lineWidth = 2, -->
+<!--                 type = "areaspline", # you can change the type -->
+<!--                 fillColor = "white" -->
+<!--                 ), -->
+<!--               handles = list( -->
+<!--                 backgroundColor = "grey", -->
+<!--                 borderColor = "black")) %>% -->
+<!--             hc_colors(c("darkcyan", "darkred")) %>% -->
+<!--             hc_chart(plotBorderWidth = 0.5, plotBorderColor = '#b4b4b4', height = NULL) -->
+
+<!--       output$totalFlowsPlot <- renderHighchart({ -->
+<!--          total_flows_plot -->
+<!--         }) -->
+<!--    } -->
+<!-- }) -->
+<!-- ``` -->
+
+<!-- ### Reservoir storage -->
+<!-- ```{r} -->
+<!-- # plotOutput("diversionsPlot") -->
+<!-- highchartOutput("storagePlot") -->
+<!-- ``` -->
+
+<!-- ```{r context="server"} -->
+<!-- # Clicking on map 1 outputs Value boxes on both pages + catchment polygons + Dat table + success panel -->
+<!-- observeEvent(input$baseMap_click, { -->
+<!--    if(!is.null(input$baseMap_click)) { -->
+<!--       click <- input$baseMap_click %>% -->
+<!--         data.frame() %>% -->
+<!--         dplyr::select(lat,lng) -->
+<!--       print(click) -->
+
+<!--       pt <- sf::st_as_sf( -->
+<!--         click, -->
+<!--         coords = c("lng", "lat"), -->
+<!--         crs = 4326 -->
+<!--         ) -->
+
+<!--       struct_name <- input$baseMap_marker_click$id -->
+<!--       # struct_name <- "long_draw" -->
+
+<!--       storage    <- res_storage %>% -->
+<!--         filter(structure_name == struct_name) %>%  -->
+<!--         mutate( -->
+<!--           date = lubridate::mdy(date), -->
+<!--           year = lubridate::year(date) -->
+<!--         ) %>% -->
+<!--         group_by(year) %>% -->
+<!--         summarize( -->
+<!--           volume = mean(volume, na.rm = T), -->
+<!--           stage  = mean(stage, na.rm = T) -->
+<!--                   ) %>%  -->
+<!--         mutate(across(where(anyNA), ~ replace_na(., 0)))  -->
+<!--         # arrange(date) -->
+
+<!--       storage_plot <-  -->
+<!--         highchart() %>%   -->
+<!--         hc_plotOptions(line   = list(marker = list(enabled = FALSE, symbol = "circle"), lineWidth = 3)) %>% -->
+<!--          hc_title(text = "Reservoir storage & stage",  -->
+<!--             style = list(color = "black", fontSize = 18, fontWeight = "bold")) %>% -->
+<!--         hc_xAxis(  -->
+<!--             title = list(style = list(fontSize = 14, fontWeight = "bold", color = "black")), -->
+<!--             labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"))) %>% -->
+<!--          # type = "datetime" reversed = T tickInterval =  50) %>% -->
+<!--         hc_yAxis_multiples( -->
+<!--           list(title = list(text = "Storage volume (AF)", -->
+<!--                             style = list(fontSize = 14, color = "black", fontWeight = "bold")), -->
+<!--                labels=list(style = list(fontSize = 11, color = "black", fontWeight = "bold"), format = '{value} AF'), -->
+<!--                min=0, max=max(storage$volume), -->
+<!--                showFirstLabel = TRUE,showLastLabel=TRUE, -->
+<!--                opposite = FALSE), -->
+<!--           list(title = list(text = "Stage (ft)", style = list(fontSize = 14, color = "black", fontWeight = "bold")), -->
+<!--                min=0, max = max(storage$stage), -->
+<!--                labels = list(style = list(fontSize = 11, color = "black", fontWeight = "bold"), format = "{value} ft"), showLastLabel = FALSE, -->
+<!--                opposite = TRUE)) %>% -->
+<!--             # hc_yAxis_multiples(create_yaxis(naxis = 2, heights = c(1, 1))) %>% -->
+<!--             hc_legend(itemStyle = list(fontSize = 14, color = "black", fontWeight = "bold")) %>% -->
+<!--             hc_add_series( -->
+<!--               data = storage, -->
+<!--               hcaes(x = year, y = volume), -->
+<!--               type = 'column', -->
+<!--               name = "Storage volume",  -->
+<!--               yAxis = 0,  -->
+<!--               # pointRange =  24 * 3600 * 1000, -->
+<!--               fillOpacity = 0.8) %>%  -->
+<!--             hc_add_series( -->
+<!--               data = storage, -->
+<!--               hcaes(x = year, y = stage), -->
+<!--               type = 'line', -->
+<!--               name = "Stage",  -->
+<!--               # pointRange =  24 * 3600 * 1000, -->
+<!--               yAxis = 1, -->
+<!--               fillOpacity = 0.8) %>%  -->
+<!--             hc_colors(c("darkcyan", "darkred")) %>% -->
+<!--             hc_chart(plotBorderWidth = 0.5, plotBorderColor = '#b4b4b4', height = NULL) -->
+<!--       # diversions_plot <- ggplot() + -->
+<!--       #       geom_col(data = diversions, aes(x = date, y = vol)) + -->
+<!--       #       labs( title = "Monthly water diversions",   x     = "Date", y     = "Water diversions") +  -->
+<!--       #       theme_bw() + -->
+<!--       #       theme(axis.title = element_text(face = "bold", size = 12),axis.text  = element_text(size = 10),   plot.title = element_text(face = "bold", size = 11))       -->
+
+<!-- # output$diversionsPlot <- renderPlot({ -->
+<!-- #        diversions_plot -->
+<!-- #       }) -->
+<!-- output$storagePlot <- renderHighchart({ -->
+<!--        storage_plot -->
+<!--       }) -->
+<!--       # point intersection w/ polygons -->
+<!--       # print(pt) -->
+
+<!--       # # ensure  app will not crash if a somewhere other than a shape is clicked and returns no results from point-shape intersection -->
+<!--       #  if(nrow(pt_intersect) == 0) { -->
+<!--       #     NULL -->
+<!--       #  } else { -->
+<!--       #     district_id <- pt_intersect %>% -->
+<!--       #         rename(district = DISTRICT) %>% -->
+<!--       #         mutate(district = as.numeric(district)) -->
+<!--       #  -->
+
+<!--     } -->
+<!-- }) -->
+<!-- ``` -->
